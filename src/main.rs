@@ -1,3 +1,4 @@
+mod sim_stream;
 use anyhow::Error;
 use http::{Request, Response};
 use hyper::{server::conn::Http, service::service_fn, Body};
@@ -39,20 +40,16 @@ constraint! {
 
 #[instrument]
 async fn hello(req: Request<Body>) -> Result<Response<Body>, Error> {
-    info!(message = "got req", req.headers = ?req.headers());
     Ok(Response::new(Body::from("hello")))
 }
 
 #[instrument(skip(io))]
 async fn handle<I: IO>(io: I) -> Result<(), hyper::error::Error> {
-    info!(message = "got connection");
     let conn = Http::new().serve_connection(io, service_fn(hello));
-    info!(message = "serving connection");
     if let Err(e) = conn.await {
         error!(message = "Got error serving connection", e = %e);
         return Err(e);
     }
-    info!("serving connection");
     Ok(())
 }
 
@@ -75,85 +72,79 @@ async fn main() -> Result<(), Error> {
     Ok(())
 }
 
+use hyper::client::connect::Connection;
+
+impl Connection for sim_stream::SimStream {
+    fn connected(&self) -> hyper::client::connect::Connected {
+        hyper::client::connect::Connected::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::handle;
+    use super::{
+        handle,
+        sim_stream::{self, chan},
+    };
     use anyhow::Error;
+    use http::{Method, Request, Uri};
+    use hyper::{client::conn::handshake, Body};
     use std::{
-        io,
+        future::Future,
+        net::SocketAddr,
         pin::Pin,
         task::{Context, Poll},
     };
-    use tokio::{
-        fs::File,
-        io::{AsyncRead, AsyncReadExt, AsyncWrite},
-    };
-    use tokio_test::io::Builder;
+    use tokio::net::TcpStream;
+    use tower::{service_fn, Service};
     use tracing_subscriber::{fmt, layer::SubscriberExt, Registry};
 
+    #[derive(Clone)]
+    struct LocalConnector {
+        inner: sim_stream::SimStream,
+    }
+
+    impl Service<Uri> for LocalConnector {
+        type Response = sim_stream::SimStream;
+        type Error = std::io::Error;
+        // We can't "name" an `async` generated future.
+        type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+        fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            // This connector is always ready, but others might not be.
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _: Uri) -> Self::Future {
+            let inner = self.inner.clone();
+            Box::pin(async move { Ok(inner) })
+        }
+    }
+
     #[tokio::test]
-    async fn test_handler() -> Result<(), Error> {
-        let fmt_layer = fmt::Layer::builder().finish();
-        let _s = tracing::subscriber::set_default(Registry::default().with(fmt_layer));
+    async fn test_stream_handler() -> Result<(), Error> {
+        let subscriber = Registry::default().with(fmt::Layer::default());
+        let _s = tracing::subscriber::set_default(subscriber);
+        let (client, server) = chan();
 
-        let mut req = File::open("fixtures/request.txt")
-            .await
-            .expect("Unable to open file");
-        let mut req_buf = vec![];
-        req.read_to_end(&mut req_buf)
-            .await
-            .expect("Unable to read file into buffer");
+        let req = Request::builder()
+            .version(http::Version::HTTP_2)
+            .method(Method::GET)
+            .body(Body::empty())
+            .expect("Can't build request");
 
-        let mut rsp = File::open("fixtures/response.txt")
-            .await
-            .expect("Unable to open file");
-        let mut rsp_buf = vec![];
-        rsp.read_to_end(&mut rsp_buf)
-            .await
-            .expect("Unable to read file into buffer");
+        // let (mut svc, conn) = handshake(client).await?;
+        // tokio::spawn(conn);
 
-        let mock = Builder::new().read(&req_buf).write(&rsp_buf).build();
-        handle(mock).await.expect("Unable to handle request");
+        let mut client = hyper::Client::builder().build(LocalConnector { inner: client });
+
+        tokio::spawn(async {
+            handle(server).await.expect("Unable to handle request");
+        });
+
+        let res = client.call(req).await.expect("Unable to send request");
+        assert_eq!(res.status(), http::StatusCode::OK);
 
         Ok(())
-    }
-
-    #[derive(Debug, PartialEq)]
-    struct MockIO {
-        inner: Vec<u8>,
-    }
-
-    impl AsyncRead for MockIO {
-        fn poll_read(
-            mut self: Pin<&mut Self>,
-            _: &mut Context<'_>,
-            buf: &mut [u8],
-        ) -> Poll<Result<usize, io::Error>> {
-            let inner: &mut Vec<u8> = self.inner.as_mut();
-            let mut inner = io::Cursor::new(inner);
-            Poll::Ready(io::Read::read(&mut inner, buf))
-        }
-    }
-
-    impl AsyncWrite for MockIO {
-        fn poll_write(
-            mut self: Pin<&mut Self>,
-            _: &mut Context<'_>,
-            buf: &[u8],
-        ) -> Poll<Result<usize, io::Error>> {
-            let mut inner: &mut Vec<u8> = self.inner.as_mut();
-            inner.clear();
-            inner.reserve_exact(buf.len());
-
-            Poll::Ready(io::Write::write(&mut inner, buf))
-        }
-
-        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
-            Poll::Ready(Ok(()))
-        }
-
-        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
-            Poll::Ready(Ok(()))
-        }
     }
 }

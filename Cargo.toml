@@ -9,12 +9,9 @@ edition = "2018"
 [dependencies]
 hyper = "0.13.2"
 tracing = "0.1.13"
-tokio = { version = "0.2.13", features = ["full"], path = "../tokio/tokio" }
+tokio = { version = "0.2.13", features = ["full"] }
 tracing-subscriber = "0.2.1"
 tracing-futures = "0.2.3"
 http = "0.2.0"
 anyhow = "1.0.26"
-tokio-test = { version = "0.2.0", path = "../tokio/tokio-test" }
-
-[patch.crates-io]
-tokio = { version = "0.2.13", features = ["full"], path = "../tokio/tokio" }
+tower = "0.3.1"
