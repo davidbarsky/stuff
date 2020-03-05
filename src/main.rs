@@ -72,79 +72,47 @@ async fn main() -> Result<(), Error> {
     Ok(())
 }
 
-use hyper::client::connect::Connection;
-
-impl Connection for sim_stream::SimStream {
-    fn connected(&self) -> hyper::client::connect::Connected {
-        hyper::client::connect::Connected::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         handle,
-        sim_stream::{self, chan},
+        sim_stream::{chan, SimStream, SimulatedConnector},
     };
     use anyhow::Error;
-    use http::{Method, Request, Uri};
-    use hyper::{client::conn::handshake, Body};
-    use std::{
-        future::Future,
-        net::SocketAddr,
-        pin::Pin,
-        task::{Context, Poll},
-    };
-    use tokio::net::TcpStream;
+    use http::{Method, Request};
+    use hyper::Body;
     use tower::{service_fn, Service};
     use tracing_subscriber::{fmt, layer::SubscriberExt, Registry};
-
-    #[derive(Clone)]
-    struct LocalConnector {
-        inner: sim_stream::SimStream,
-    }
-
-    impl Service<Uri> for LocalConnector {
-        type Response = sim_stream::SimStream;
-        type Error = std::io::Error;
-        // We can't "name" an `async` generated future.
-        type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
-
-        fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-            // This connector is always ready, but others might not be.
-            Poll::Ready(Ok(()))
-        }
-
-        fn call(&mut self, _: Uri) -> Self::Future {
-            let inner = self.inner.clone();
-            Box::pin(async move { Ok(inner) })
-        }
-    }
 
     #[tokio::test]
     async fn test_stream_handler() -> Result<(), Error> {
         let subscriber = Registry::default().with(fmt::Layer::default());
-        let _s = tracing::subscriber::set_default(subscriber);
-        let (client, server) = chan();
+        let f = tracing::subscriber::with_default(subscriber, || async {
+            let (client, server) = chan();
 
-        let req = Request::builder()
-            .version(http::Version::HTTP_2)
-            .method(Method::GET)
-            .body(Body::empty())
-            .expect("Can't build request");
+            let req = Request::builder()
+                .method(Method::GET)
+                .uri("http://httpbin.org")
+                .body(Body::empty())
+                .expect("Can't build request");
 
-        // let (mut svc, conn) = handshake(client).await?;
-        // tokio::spawn(conn);
+            let conn = service_fn(move |_| {
+                let f = Ok::<_, Error>(client.clone());
+                Box::pin(async { f })
+            });
 
-        let mut client = hyper::Client::builder().build(LocalConnector { inner: client });
+            // let conn = SimulatedConnector { inner: client };
+            let mut client = hyper::Client::builder().build(conn);
 
-        tokio::spawn(async {
-            handle(server).await.expect("Unable to handle request");
+            tokio::spawn(async {
+                handle(server).await.expect("Unable to handle request");
+            });
+
+            let res = client.call(req).await.expect("Unable to send request");
+            assert_eq!(res.status(), http::StatusCode::OK);
+
+            Ok(())
         });
-
-        let res = client.call(req).await.expect("Unable to send request");
-        assert_eq!(res.status(), http::StatusCode::OK);
-
-        Ok(())
+        f.await
     }
 }

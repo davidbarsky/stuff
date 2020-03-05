@@ -1,11 +1,17 @@
+use http::Uri;
+use hyper::client::connect::Connection;
 use std::cmp::min;
 use std::collections::VecDeque;
 use std::io::Result as IoResult;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::task::{Context, Poll, Waker};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+    sync::Mutex,
+    task::{Context, Poll, Waker},
+};
 use tokio::io::{AsyncRead, AsyncWrite};
+use tower::Service;
 
 /// Creates a pair of AsyncReadWrite data streams, where the write end of each member of the pair
 /// is the read end of the other member of the pair.  This allows us to emulate the behavior of a TcpStream
@@ -33,6 +39,32 @@ pub(crate) fn chan() -> (SimStream, SimStream) {
     };
 
     (left, right)
+}
+
+#[derive(Clone)]
+pub struct SimulatedConnector {
+    pub inner: SimStream,
+}
+
+impl Service<Uri> for SimulatedConnector {
+    type Response = SimStream;
+    type Error = std::io::Error;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, _: Uri) -> Self::Future {
+        let inner = self.inner.clone();
+        Box::pin(async move { Ok(inner) })
+    }
+}
+
+impl Connection for SimStream {
+    fn connected(&self) -> hyper::client::connect::Connected {
+        hyper::client::connect::Connected::new()
+    }
 }
 
 /// A struct that implements AsyncRead + AsyncWrite (similarly to TcpStream) using in-memory
