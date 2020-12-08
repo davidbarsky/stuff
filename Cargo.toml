@@ -7,11 +7,11 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-hyper = "0.13.2"
-tracing = "0.1.13"
-tokio = { version = "0.2.13", features = ["full"] }
-tracing-subscriber = "0.2.1"
-tracing-futures = "0.2.3"
-http = "0.2.0"
-anyhow = "1.0.26"
-tower = "0.3.1"
+hyper = "0.13"
+tracing = "0.1"
+tokio = { version = "0.2", features = ["full"] }
+tracing-subscriber = "0.2"
+http = "0.2"
+anyhow = "1.0"
+tower = "0.3"
+partial-io = { version = "0.4", features = ["tokio02"] }

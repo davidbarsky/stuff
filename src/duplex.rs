@@ -1,5 +1,6 @@
 use http::Uri;
 use hyper::client::connect::Connection;
+use partial_io::PartialAsyncWrite;
 use std::cmp::min;
 use std::collections::VecDeque;
 use std::io::Result as IoResult;
@@ -16,14 +17,14 @@ use tower::Service;
 /// Creates a pair of AsyncReadWrite data streams, where the write end of each member of the pair
 /// is the read end of the other member of the pair.  This allows us to emulate the behavior of a TcpStream
 /// but in-memory, deterministically, and with full control over failure injection.
-pub(crate) fn chan() -> (SimStream, SimStream) {
+pub(crate) fn chan() -> (Duplex, Duplex) {
     // Set up two reference-counted, lock-guarded byte VecDeques, one for each direction of the
     // connection
     let one = Arc::new(Mutex::new(BufferState::new()));
     let two = Arc::new(Mutex::new(BufferState::new()));
 
     // Use buf1 for the read-side of left, use buf2 for the write-side of left
-    let left = SimStream {
+    let left = Duplex {
         read: ReadHalf {
             buffer: one.clone(),
         },
@@ -33,7 +34,7 @@ pub(crate) fn chan() -> (SimStream, SimStream) {
     };
 
     // Now swap the buffers for right
-    let right = SimStream {
+    let right = Duplex {
         read: ReadHalf { buffer: two },
         write: WriteHalf { buffer: one },
     };
@@ -42,12 +43,15 @@ pub(crate) fn chan() -> (SimStream, SimStream) {
 }
 
 #[derive(Clone)]
-pub struct SimulatedConnector {
-    pub inner: SimStream,
+pub struct SimulatedConnector<T> {
+    pub inner: T,
 }
 
-impl Service<Uri> for SimulatedConnector {
-    type Response = SimStream;
+impl<T> Service<Uri> for SimulatedConnector<T>
+where
+    T: AsyncRead + AsyncWrite + Unpin + Clone + Send + 'static,
+{
+    type Response = T;
     type Error = std::io::Error;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
@@ -61,7 +65,7 @@ impl Service<Uri> for SimulatedConnector {
     }
 }
 
-impl Connection for SimStream {
+impl Connection for Duplex {
     fn connected(&self) -> hyper::client::connect::Connected {
         hyper::client::connect::Connected::new()
     }
@@ -72,13 +76,13 @@ impl Connection for SimStream {
 /// `tokio::io::split`, as that would negate the need for this struct.
 // TODO: Implement the ability to explicitly close a connection
 #[derive(Debug, Clone)]
-pub struct SimStream {
+pub struct Duplex {
     read: ReadHalf,
     write: WriteHalf,
 }
 
 /// Delegates to the underlying `write` member's methods
-impl AsyncWrite for SimStream {
+impl AsyncWrite for Duplex {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -97,7 +101,7 @@ impl AsyncWrite for SimStream {
 }
 
 /// Delegates to the underlying `read` member's methods
-impl AsyncRead for SimStream {
+impl AsyncRead for Duplex {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
